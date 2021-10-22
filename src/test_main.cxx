@@ -14,7 +14,6 @@
 #include <memory>
 #include <vector>
 #include <ranges>
-#include <vulkan/vulkan_enums.hpp>
 
 #define VULKAN_HPP_NODISCARD_WARNINGS
 #include <vulkan/vulkan_raii.hpp>
@@ -125,7 +124,14 @@ int main() // NOLINT(bugprone-exception-escape)
 
     // create device
     auto device = instancesManager.build_device(
-        physicalDevice, [](unsigned /* index */, vk::QueueFamilyProperties const& properties) { return bool { properties.queueFlags & vk::QueueFlagBits::eGraphics }; }, [&physicalDevice, &surface](unsigned index, vk::QueueFamilyProperties const& properties) { return physicalDevice.getSurfaceSupportKHR(index, *surface); });
+        physicalDevice,
+		device_extensions,
+		[](unsigned /* index */, vk::QueueFamilyProperties const& properties) {
+			return bool { properties.queueFlags & vk::QueueFlagBits::eGraphics };
+		},
+		[&physicalDevice, &surface](unsigned index, vk::QueueFamilyProperties const& properties) {
+			return physicalDevice.getSurfaceSupportKHR(index, *surface);
+		});
 
 	auto surface_format = std::invoke([&](){
 		auto all_surface_format = physicalDevice.getSurfaceFormatsKHR(*surface);
@@ -140,7 +146,66 @@ int main() // NOLINT(bugprone-exception-escape)
 		}
 	});
 
+	auto present_mode = vk::PresentModeKHR::eFifo;
+
+	auto surface_capability =
+	    physicalDevice.getSurfaceCapabilitiesKHR(*surface);
+	auto swapchainExtent = std::invoke([&]() {
+		if (surface_capability.currentExtent.width != std::numeric_limits<uint32_t>::max()) {
+			return surface_capability.currentExtent;
+		}
+		int width{}, height{};
+		glfwGetWindowSize(&*window, &width, &height);
+		std::clamp( width, int(surface_capability.minImageExtent.width),  int(surface_capability.maxImageExtent.width));
+		std::clamp(height, int(surface_capability.minImageExtent.height), int(surface_capability.maxImageExtent.height));
+		return vk::Extent2D(width, height);
+	});
+
 	std::cout << to_string(surface_format.format) << " / " << to_string(surface_format.colorSpace) << "\n";
+	std::cout << swapchainExtent.width << "×" << swapchainExtent.height << "\n";
+
+	auto pre_transform = vk::SurfaceTransformFlagBitsKHR::eIdentity;
+	
+	auto compositeAlpha = 
+      ( surface_capability.supportedCompositeAlpha & vk::CompositeAlphaFlagBitsKHR::ePreMultiplied )
+        ? vk::CompositeAlphaFlagBitsKHR::ePreMultiplied
+      : ( surface_capability.supportedCompositeAlpha & vk::CompositeAlphaFlagBitsKHR::ePostMultiplied )
+        ? vk::CompositeAlphaFlagBitsKHR::ePostMultiplied
+      : ( surface_capability.supportedCompositeAlpha & vk::CompositeAlphaFlagBitsKHR::eInherit )
+        ? vk::CompositeAlphaFlagBitsKHR::eInherit
+        : vk::CompositeAlphaFlagBitsKHR::eOpaque;
+
+	auto createInfo = vk::SwapchainCreateInfoKHR()
+		.setSurface(*surface)
+		.setMinImageCount(surface_capability.minImageCount)
+		.setImageFormat(surface_format.format)
+		.setImageColorSpace(vk::ColorSpaceKHR::eSrgbNonlinear)
+		.setImageExtent(swapchainExtent)
+		.setImageArrayLayers(1)
+		.setImageUsage(vk::ImageUsageFlagBits::eColorAttachment)
+		.setImageSharingMode(vk::SharingMode::eExclusive)
+		.setPreTransform(pre_transform)
+		.setCompositeAlpha(compositeAlpha)
+		.setPresentMode(present_mode)
+		.setClipped(true);
+
+	auto swapchain = vk::raii::SwapchainKHR(device, createInfo);
+
+	auto images = swapchain.getImages();
+	auto componentMapping = vk::ComponentMapping(vk::ComponentSwizzle::eR, vk::ComponentSwizzle::eR, vk::ComponentSwizzle::eB, vk::ComponentSwizzle::eA);
+	auto subResourceRange = vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1);
+	auto views = std::vector<vk::raii::ImageView>{};
+	std::ranges::copy(
+	    images | std::views::transform([&](const auto& image) {
+		return vk::raii::ImageView(
+		    device, vk::ImageViewCreateInfo()
+				.setViewType(vk::ImageViewType::e2D)
+				.setFormat(surface_format.format)
+				.setImage(image)
+				.setComponents(componentMapping)
+				.setSubresourceRange(subResourceRange));
+	    }),
+		std::back_insert_iterator(views));
 
     while (window) {
         glfwPollEvents();
